@@ -6,7 +6,6 @@ import pandas as pd
 import streamlit as st
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
-from pptx.util import Pt
 
 TEMPLATE_PATH = "template.pptx"
 
@@ -199,7 +198,6 @@ def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
         ),
     )
     shape.chart.replace_data(chart_data)
-    set_chart_number_format(shape.chart, "0.0")
 
 
 def update_question_chart(
@@ -218,26 +216,6 @@ def update_question_chart(
         ),
     )
     shape.chart.replace_data(chart_data)
-    set_chart_number_format(shape.chart, "0%")
-
-
-def set_chart_number_format(chart, number_format: str) -> None:
-    for series in chart.series:
-        if series.has_data_labels:
-            series.data_labels.number_format = number_format
-
-
-def set_font_cjk(run, font_name: str, font_size_pt: float) -> None:
-    run.font.name = font_name
-    run.font.size = Pt(font_size_pt)
-
-
-def format_table_font(table, font_name: str, font_size_pt: float) -> None:
-    for row in table.rows:
-        for cell in row.cells:
-            for paragraph in cell.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    set_font_cjk(run, font_name, font_size_pt)
 
 
 def update_question_table(
@@ -300,7 +278,6 @@ def populate_ppt(
                     idx = int(table_match.group(1))
                     if 1 <= idx <= 10:
                         update_question_table(shape, idx, counts_by_question)
-                        format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
 
     replace_text_placeholders(prs, replacements)
 
