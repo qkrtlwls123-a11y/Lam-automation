@@ -129,11 +129,20 @@ def set_text_preserve_style(text_frame, value: str) -> None:
 
 def replace_text_placeholders(prs: Presentation, replacements: Dict[str, str]) -> None:
     def replace_in_runs(paragraph) -> None:
-        for run in paragraph.runs:
-            updated = run.text
-            for key, value in replacements.items():
-                updated = updated.replace(key, value)
-            run.text = updated
+        if not paragraph.runs:
+            return
+
+        original = "".join(run.text for run in paragraph.runs)
+        updated = original
+        for key, value in replacements.items():
+            updated = updated.replace(key, value)
+
+        if updated == original:
+            return
+
+        paragraph.runs[0].text = updated
+        for run in paragraph.runs[1:]:
+            run.text = ""
 
     for slide in prs.slides:
         for shape in slide.shapes:
@@ -149,6 +158,9 @@ def replace_text_placeholders(prs: Presentation, replacements: Dict[str, str]) -
 
 
 def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
+    def one_decimal(value: float) -> float:
+        return round(value, 1)
+
     chart_data = CategoryChartData()
     chart_data.categories = [
         "전체 평균",
@@ -167,22 +179,22 @@ def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
         "10",
     ]
     chart_data.add_series(
-        "계열 1",
+        "계열",
         (
-            placeholders["total_avg_00"],
-            placeholders["total_avg_01"],
-            placeholders["sub_avg_01"],
-            placeholders["sub_avg_02"],
-            placeholders["sub_avg_03"],
-            placeholders["sub_avg_04"],
-            placeholders["sub_avg_05"],
-            placeholders["total_avg_02"],
-            placeholders["sub_avg_06"],
-            placeholders["sub_avg_07"],
-            placeholders["sub_avg_08"],
-            placeholders["total_avg_03"],
-            placeholders["sub_avg_09"],
-            placeholders["sub_avg_10"],
+            one_decimal(placeholders["total_avg_00"]),
+            one_decimal(placeholders["total_avg_01"]),
+            one_decimal(placeholders["sub_avg_01"]),
+            one_decimal(placeholders["sub_avg_02"]),
+            one_decimal(placeholders["sub_avg_03"]),
+            one_decimal(placeholders["sub_avg_04"]),
+            one_decimal(placeholders["sub_avg_05"]),
+            one_decimal(placeholders["total_avg_02"]),
+            one_decimal(placeholders["sub_avg_06"]),
+            one_decimal(placeholders["sub_avg_07"]),
+            one_decimal(placeholders["sub_avg_08"]),
+            one_decimal(placeholders["total_avg_03"]),
+            one_decimal(placeholders["sub_avg_09"]),
+            one_decimal(placeholders["sub_avg_10"]),
         ),
     )
     shape.chart.replace_data(chart_data)
@@ -193,9 +205,15 @@ def update_question_chart(
 ) -> None:
     percentages = percentages_by_question[question_idx]
     chart_data = CategoryChartData()
-    chart_data.categories = ["1점", "2점", "3점", "4점"]
+    chart_data.categories = ["100점", "75점", "50점", "25점"]
     chart_data.add_series(
-        "응답 비율(%)", (percentages[1], percentages[2], percentages[3], percentages[4])
+        "계열",
+        (
+            percentages[4] / 100.0,
+            percentages[3] / 100.0,
+            percentages[2] / 100.0,
+            percentages[1] / 100.0,
+        ),
     )
     shape.chart.replace_data(chart_data)
 
