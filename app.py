@@ -291,6 +291,56 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             return {compact}
         return {compact[idx : idx + 2] for idx in range(len(compact) - 1)}
 
+    def normalize_for_tokenize(value: str) -> str:
+        normalized = re.sub(r"[^0-9a-zA-Z가-힣\s]", " ", value.lower())
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def extract_keywords(value: str) -> set:
+        stopwords = {
+            "그리고",
+            "그냥",
+            "정말",
+            "매우",
+            "너무",
+            "조금",
+            "관련",
+            "대한",
+            "위한",
+        }
+        suffixes = (
+            "입니다",
+            "있습니다",
+            "합니다",
+            "했다",
+            "하는",
+            "했던",
+            "되는",
+            "으로",
+            "에서",
+            "에게",
+            "까지",
+            "처럼",
+            "보다",
+            "하다",
+            "하기",
+        )
+
+        keywords = set()
+        for token in normalize_for_tokenize(value).split():
+            if len(token) <= 1 or token in stopwords:
+                continue
+
+            trimmed = token
+            for suffix in suffixes:
+                if len(trimmed) > len(suffix) + 1 and trimmed.endswith(suffix):
+                    trimmed = trimmed[: -len(suffix)]
+                    break
+
+            if len(trimmed) > 1:
+                keywords.add(trimmed)
+
+        return keywords
+
     for raw in series.tolist():
         if pd.isna(raw):
             continue
@@ -311,6 +361,7 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             "count": count,
             "norm": normalize_for_compare(text),
             "grams": char_bigrams(text),
+            "keywords": extract_keywords(text),
         }
         for text, count in deduped_counts.items()
     ]
@@ -346,7 +397,19 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             left_item["norm"],
             right_item["norm"],
         ).ratio()
-        if max(bigram_similarity, sequence_similarity) >= 0.55:
+
+        keyword_overlap = left_item["keywords"] & right_item["keywords"]
+        keyword_union = left_item["keywords"] | right_item["keywords"]
+        keyword_similarity = len(keyword_overlap) / len(keyword_union) if keyword_union else 0.0
+        compact_left = re.sub(r"\s+", "", str(left_item["norm"]))
+        compact_right = re.sub(r"\s+", "", str(right_item["norm"]))
+        prefix_match = compact_left[:3] == compact_right[:3] if min(len(compact_left), len(compact_right)) >= 3 else False
+
+        if (
+            max(bigram_similarity, sequence_similarity) >= 0.55
+            or keyword_similarity >= 0.5
+            or (keyword_overlap and prefix_match)
+        ):
             union(left, right)
 
     grouped: "OrderedDict[int, List[Dict[str, object]]]" = OrderedDict()
@@ -354,8 +417,9 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
         root = find(idx)
         grouped.setdefault(root, []).append(item)
 
-    lines: List[str] = []
-    theme_no = 1
+    grouped_entries: List[Dict[str, object]] = []
+    etc_details: List[Dict[str, object]] = []
+
     for group_items in grouped.values():
         group_total = sum(int(entry["count"]) for entry in group_items)
         representative = sorted(
@@ -363,20 +427,47 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
             reverse=True,
         )[0]
-        lines.append(f"주제{theme_no}. {representative['text']} ({group_total})")
-
         details = sorted(
             group_items,
             key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
             reverse=True,
         )
-        for detail in details:
+
+        if group_total == 1:
+            etc_details.extend(details)
+            continue
+
+        grouped_entries.append(
+            {
+                "representative": str(representative["text"]),
+                "group_total": group_total,
+                "details": details,
+            }
+        )
+
+    grouped_entries.sort(key=lambda entry: int(entry["group_total"]), reverse=True)
+
+    lines: List[str] = []
+    theme_no = 1
+    for entry in grouped_entries:
+        lines.append(f"주제{theme_no}. {entry['representative']} ({entry['group_total']})")
+        for detail in entry["details"]:
             text = str(detail["text"])
             count = int(detail["count"])
             lines.append(f"- {text} ({count})" if count > 1 else f"- {text}")
-
         theme_no += 1
 
+    if etc_details:
+        etc_details = sorted(
+            etc_details,
+            key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
+            reverse=True,
+        )
+        lines.append(f"주제{theme_no}. 기타 ({len(etc_details)})")
+        for detail in etc_details:
+            lines.append(f"- {str(detail['text'])}")
+
+    lines.append("")
     lines.append(f"필터링 응답 {filtered_count}개")
     return "\n".join(lines)
 
