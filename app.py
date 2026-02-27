@@ -66,7 +66,9 @@ def format_score(value: float) -> str:
     return f"{value:.1f}"
 
 
-def compute_metrics(df: pd.DataFrame, question_cols: List[str]) -> Tuple[Dict[str, float], Dict[int, Dict[int, float]], Dict[int, Dict[int, int]], int]:
+def compute_metrics(
+    df: pd.DataFrame, question_cols: List[str]
+) -> Tuple[Dict[str, float], Dict[int, Dict[int, float]], Dict[int, Dict[int, int]], int]:
     numeric = df[question_cols].apply(pd.to_numeric, errors="coerce")
     respondent_count = int(numeric.dropna(how="all").shape[0])
 
@@ -107,57 +109,65 @@ def compute_metrics(df: pd.DataFrame, question_cols: List[str]) -> Tuple[Dict[st
     return placeholders, percentages_by_question, counts_by_question, respondent_count
 
 
+def set_text_preserve_style(text_frame, value: str) -> None:
+    if not text_frame.paragraphs:
+        text_frame.text = value
+        return
+
+    paragraph = text_frame.paragraphs[0]
+    if paragraph.runs:
+        paragraph.runs[0].text = value
+        for run in paragraph.runs[1:]:
+            run.text = ""
+    else:
+        paragraph.text = value
+
+    for extra_paragraph in text_frame.paragraphs[1:]:
+        for run in extra_paragraph.runs:
+            run.text = ""
+
+
 def replace_text_placeholders(prs: Presentation, replacements: Dict[str, str]) -> None:
-    pattern = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
-
-    def _replace_text(text: str) -> str:
-        def repl(match: re.Match) -> str:
-            key = match.group(1)
-            return replacements.get(key, match.group(0))
-
-        return pattern.sub(repl, text)
+    def replace_in_runs(paragraph) -> None:
+        for run in paragraph.runs:
+            updated = run.text
+            for key, value in replacements.items():
+                updated = updated.replace(key, value)
+            run.text = updated
 
     for slide in prs.slides:
         for shape in slide.shapes:
             if hasattr(shape, "text_frame") and shape.text_frame is not None:
                 for paragraph in shape.text_frame.paragraphs:
-                    if not paragraph.text:
-                        continue
-                    new_text = _replace_text(paragraph.text)
-                    if new_text != paragraph.text:
-                        paragraph.text = new_text
+                    replace_in_runs(paragraph)
 
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         for paragraph in cell.text_frame.paragraphs:
-                            if not paragraph.text:
-                                continue
-                            new_text = _replace_text(paragraph.text)
-                            if new_text != paragraph.text:
-                                paragraph.text = new_text
+                            replace_in_runs(paragraph)
 
 
 def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
     chart_data = CategoryChartData()
     chart_data.categories = [
         "전체 평균",
-        "과정 만족도",
-        "문항1",
-        "문항2",
-        "문항3",
-        "문항4",
-        "문항5",
-        "문항6",
-        "문항7",
-        "문항8",
-        "문항9",
-        "문항10",
-        "강사 만족도",
-        "운영 만족도",
+        "과정만족도 평균",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "강사만족도 평균",
+        "6",
+        "7",
+        "8",
+        "운영 만족도 평균",
+        "9",
+        "10",
     ]
     chart_data.add_series(
-        "점수",
+        "계열 1",
         (
             placeholders["total_avg_00"],
             placeholders["total_avg_01"],
@@ -166,27 +176,33 @@ def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
             placeholders["sub_avg_03"],
             placeholders["sub_avg_04"],
             placeholders["sub_avg_05"],
+            placeholders["total_avg_02"],
             placeholders["sub_avg_06"],
             placeholders["sub_avg_07"],
             placeholders["sub_avg_08"],
+            placeholders["total_avg_03"],
             placeholders["sub_avg_09"],
             placeholders["sub_avg_10"],
-            placeholders["total_avg_02"],
-            placeholders["total_avg_03"],
         ),
     )
     shape.chart.replace_data(chart_data)
 
 
-def update_question_chart(shape, question_idx: int, percentages_by_question: Dict[int, Dict[int, float]]) -> None:
+def update_question_chart(
+    shape, question_idx: int, percentages_by_question: Dict[int, Dict[int, float]]
+) -> None:
     percentages = percentages_by_question[question_idx]
     chart_data = CategoryChartData()
     chart_data.categories = ["1점", "2점", "3점", "4점"]
-    chart_data.add_series("응답 비율(%)", (percentages[1], percentages[2], percentages[3], percentages[4]))
+    chart_data.add_series(
+        "응답 비율(%)", (percentages[1], percentages[2], percentages[3], percentages[4])
+    )
     shape.chart.replace_data(chart_data)
 
 
-def update_question_table(shape, question_idx: int, counts_by_question: Dict[int, Dict[int, int]]) -> None:
+def update_question_table(
+    shape, question_idx: int, counts_by_question: Dict[int, Dict[int, int]]
+) -> None:
     table = shape.table
     counts = counts_by_question[question_idx]
     total = sum(counts.values())
@@ -204,7 +220,7 @@ def update_question_table(shape, question_idx: int, counts_by_question: Dict[int
 
     for offset, value in enumerate(rows, start=1):
         if len(table.rows) > offset and len(table.columns) > 1:
-            table.cell(offset, 1).text = value
+            set_text_preserve_style(table.cell(offset, 1).text_frame, value)
 
 
 def populate_ppt(
@@ -214,11 +230,11 @@ def populate_ppt(
     df = pd.read_excel(io.BytesIO(excel_bytes))
     question_cols = identify_question_columns(df)
 
-    placeholders, percentages_by_question, counts_by_question, respondent_count = compute_metrics(df, question_cols)
+    placeholders, percentages_by_question, counts_by_question, respondent_count = compute_metrics(
+        df, question_cols
+    )
 
-    replacements: Dict[str, str] = {
-        key: format_score(value) for key, value in placeholders.items()
-    }
+    replacements: Dict[str, str] = {key: format_score(value) for key, value in placeholders.items()}
     replacements["class_name"] = class_name.strip() if class_name.strip() else "과정명 미입력"
     replacements["respondent_count"] = str(respondent_count)
 
