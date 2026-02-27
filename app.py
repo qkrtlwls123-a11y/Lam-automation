@@ -1,4 +1,5 @@
 import io
+from collections import OrderedDict
 import re
 from typing import Dict, List, Tuple
 
@@ -264,6 +265,55 @@ def update_question_table(
             set_text_preserve_style(table.cell(offset, 1).text_frame, value)
 
 
+def summarize_qualitative_responses(series: pd.Series) -> str:
+    deduped_counts: "OrderedDict[str, int]" = OrderedDict()
+    filtered_count = 0
+
+    def is_filtered(value: str) -> bool:
+        normalized = re.sub(r"\s+", "", value).lower().strip().strip('"\'')
+        normalized_wo_punct = normalized.rstrip(".!~")
+        return normalized in {"", "."} or normalized_wo_punct in {
+            "없음",
+            "없습니다",
+            "없다",
+            "x",
+            "ㄴ",
+        }
+
+    for raw in series.tolist():
+        if pd.isna(raw):
+            continue
+        value = str(raw).strip()
+        if is_filtered(value):
+            filtered_count += 1
+            continue
+
+        key = re.sub(r"\s+", " ", value)
+        deduped_counts[key] = deduped_counts.get(key, 0) + 1
+
+    lines: List[str] = []
+    for text, count in deduped_counts.items():
+        lines.append(f"{text} ({count})" if count > 1 else text)
+
+    if not lines:
+        lines.append("(유효 응답 없음)")
+    lines.append(f"필터링 응답 {filtered_count}개")
+    return "\n".join(lines)
+
+
+def update_qualitative_table(shape, df: pd.DataFrame) -> None:
+    table = shape.table
+    if len(df.columns) < 14:
+        raise ValueError("L~N열(12~14번째 열)을 찾지 못했습니다. 엑셀 컬럼 구성을 확인해주세요.")
+
+    qualitative_cols = [df.iloc[:, 11], df.iloc[:, 12], df.iloc[:, 13]]
+
+    for idx, column in enumerate(qualitative_cols, start=1):
+        summary_text = summarize_qualitative_responses(column)
+        if len(table.rows) > 1 and len(table.columns) > idx:
+            set_text_preserve_style(table.cell(1, idx).text_frame, summary_text)
+
+
 def populate_ppt(
     excel_bytes: bytes,
     class_name: str,
@@ -301,6 +351,9 @@ def populate_ppt(
                     idx = int(table_match.group(1))
                     if 1 <= idx <= 10:
                         update_question_table(shape, idx, counts_by_question)
+                        format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
+                    elif idx == 11:
+                        update_qualitative_table(shape, df)
                         format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
 
     replace_text_placeholders(prs, replacements)
