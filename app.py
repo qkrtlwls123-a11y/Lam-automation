@@ -1,4 +1,7 @@
 import io
+from collections import OrderedDict
+from difflib import SequenceMatcher
+from itertools import combinations
 import re
 from typing import Dict, List, Tuple
 
@@ -264,6 +267,133 @@ def update_question_table(
             set_text_preserve_style(table.cell(offset, 1).text_frame, value)
 
 
+def summarize_qualitative_responses(series: pd.Series) -> str:
+    deduped_counts: "OrderedDict[str, int]" = OrderedDict()
+    filtered_count = 0
+
+    def normalize_for_compare(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip().lower()
+
+    def is_filtered(value: str) -> bool:
+        normalized = re.sub(r"\s+", "", value).lower().strip().strip('"\'')
+        normalized_wo_punct = normalized.rstrip(".!~")
+        return normalized in {"", "."} or normalized_wo_punct in {
+            "없음",
+            "없습니다",
+            "없다",
+            "x",
+            "ㄴ",
+        }
+
+    def char_bigrams(value: str) -> set:
+        compact = re.sub(r"\s+", "", value)
+        if len(compact) < 2:
+            return {compact}
+        return {compact[idx : idx + 2] for idx in range(len(compact) - 1)}
+
+    for raw in series.tolist():
+        if pd.isna(raw):
+            continue
+        value = str(raw).strip()
+        if is_filtered(value):
+            filtered_count += 1
+            continue
+
+        key = re.sub(r"\s+", " ", value)
+        deduped_counts[key] = deduped_counts.get(key, 0) + 1
+
+    if not deduped_counts:
+        return f"(유효 응답 없음)\n필터링 응답 {filtered_count}개"
+
+    items = [
+        {
+            "text": text,
+            "count": count,
+            "norm": normalize_for_compare(text),
+            "grams": char_bigrams(text),
+        }
+        for text, count in deduped_counts.items()
+    ]
+
+    parent = list(range(len(items)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for left, right in combinations(range(len(items)), 2):
+        left_item = items[left]
+        right_item = items[right]
+
+        if left_item["norm"] in right_item["norm"] or right_item["norm"] in left_item["norm"]:
+            union(left, right)
+            continue
+
+        union_size = len(left_item["grams"] | right_item["grams"])
+        bigram_similarity = (
+            len(left_item["grams"] & right_item["grams"]) / union_size if union_size else 0.0
+        )
+        sequence_similarity = SequenceMatcher(
+            None,
+            left_item["norm"],
+            right_item["norm"],
+        ).ratio()
+        if max(bigram_similarity, sequence_similarity) >= 0.55:
+            union(left, right)
+
+    grouped: "OrderedDict[int, List[Dict[str, object]]]" = OrderedDict()
+    for idx, item in enumerate(items):
+        root = find(idx)
+        grouped.setdefault(root, []).append(item)
+
+    lines: List[str] = []
+    theme_no = 1
+    for group_items in grouped.values():
+        group_total = sum(int(entry["count"]) for entry in group_items)
+        representative = sorted(
+            group_items,
+            key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
+            reverse=True,
+        )[0]
+        lines.append(f"주제{theme_no}. {representative['text']} ({group_total})")
+
+        details = sorted(
+            group_items,
+            key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
+            reverse=True,
+        )
+        for detail in details:
+            text = str(detail["text"])
+            count = int(detail["count"])
+            lines.append(f"- {text} ({count})" if count > 1 else f"- {text}")
+
+        theme_no += 1
+
+    lines.append(f"필터링 응답 {filtered_count}개")
+    return "\n".join(lines)
+
+
+def update_qualitative_table(shape, df: pd.DataFrame) -> None:
+    table = shape.table
+    if len(df.columns) < 14:
+        raise ValueError("L~N열(12~14번째 열)을 찾지 못했습니다. 엑셀 컬럼 구성을 확인해주세요.")
+
+    qualitative_cols = [df.iloc[:, 11], df.iloc[:, 12], df.iloc[:, 13]]
+
+    for idx, column in enumerate(qualitative_cols, start=1):
+        summary_text = summarize_qualitative_responses(column)
+        if len(table.rows) > 1 and len(table.columns) > idx:
+            set_text_preserve_style(table.cell(1, idx).text_frame, summary_text)
+
+
 def populate_ppt(
     excel_bytes: bytes,
     class_name: str,
@@ -301,6 +431,9 @@ def populate_ppt(
                     idx = int(table_match.group(1))
                     if 1 <= idx <= 10:
                         update_question_table(shape, idx, counts_by_question)
+                        format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
+                    elif idx == 11:
+                        update_qualitative_table(shape, df)
                         format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
 
     replace_text_placeholders(prs, replacements)
