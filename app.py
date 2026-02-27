@@ -9,6 +9,7 @@ from pptx.chart.data import CategoryChartData
 from pptx.util import Pt
 
 TEMPLATE_PATH = "template.pptx"
+FILTERED_TEXT_RESPONSES = {"없음", "없습니다", "없다", "x", "ㄴ", "."}
 
 
 def identify_question_columns(df: pd.DataFrame, required: int = 10) -> List[str]:
@@ -264,6 +265,46 @@ def update_question_table(
             set_text_preserve_style(table.cell(offset, 1).text_frame, value)
 
 
+def summarize_text_response(series: pd.Series) -> Tuple[str, int]:
+    cleaned = (
+        series.dropna()
+        .astype(str)
+        .map(lambda value: value.strip())
+    )
+    cleaned = cleaned[cleaned != ""]
+
+    lowered = cleaned.str.lower()
+    filtered_count = int(lowered.isin(FILTERED_TEXT_RESPONSES).sum())
+
+    kept = cleaned[~lowered.isin(FILTERED_TEXT_RESPONSES)]
+    counts = kept.value_counts(sort=False)
+
+    formatted_lines = [
+        f"{text} ({count})" if count > 1 else text
+        for text, count in counts.items()
+    ]
+
+    return "\n".join(formatted_lines), filtered_count
+
+
+def update_qualitative_table(shape, df: pd.DataFrame) -> None:
+    table = shape.table
+    target_columns = [11, 12, 13]  # L, M, N
+
+    for col_offset, df_col_idx in enumerate(target_columns, start=1):
+        if len(table.rows) <= 1 or len(table.columns) <= col_offset:
+            continue
+        if df_col_idx >= len(df.columns):
+            continue
+
+        summary_text, filtered_count = summarize_text_response(df.iloc[:, df_col_idx])
+        value = summary_text if summary_text else "-"
+        value = f"{value}\n(필터링 {filtered_count}개)"
+        set_text_preserve_style(table.cell(1, col_offset).text_frame, value)
+
+    format_table_font(table, "Noto Sans CJK KR DemiLight", 9)
+
+
 def populate_ppt(
     excel_bytes: bytes,
     class_name: str,
@@ -302,6 +343,8 @@ def populate_ppt(
                     if 1 <= idx <= 10:
                         update_question_table(shape, idx, counts_by_question)
                         format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
+                    elif idx == 11:
+                        update_qualitative_table(shape, df)
 
     replace_text_placeholders(prs, replacements)
 
