@@ -3,7 +3,7 @@ from collections import OrderedDict
 from difflib import SequenceMatcher
 from itertools import combinations
 import re
-from typing import Dict, List, Tuple, cast
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -291,10 +291,6 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             return {compact}
         return {compact[idx : idx + 2] for idx in range(len(compact) - 1)}
 
-    def extract_keywords(value: str) -> set:
-        tokens = re.findall(r"[0-9a-zA-Z가-힣]+", value.lower())
-        return {token for token in tokens if len(token) >= 2}
-
     for raw in series.tolist():
         if pd.isna(raw):
             continue
@@ -307,7 +303,7 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
         deduped_counts[key] = deduped_counts.get(key, 0) + 1
 
     if not deduped_counts:
-        return f"(유효 응답 없음)\n\n필터링 응답 {filtered_count}개"
+        return f"(유효 응답 없음)\n필터링 응답 {filtered_count}개"
 
     items = [
         {
@@ -315,7 +311,6 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             "count": count,
             "norm": normalize_for_compare(text),
             "grams": char_bigrams(text),
-            "keywords": extract_keywords(text),
         }
         for text, count in deduped_counts.items()
     ]
@@ -342,17 +337,6 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             union(left, right)
             continue
 
-        left_keywords = left_item["keywords"]
-        right_keywords = right_item["keywords"]
-        if left_keywords and right_keywords:
-            intersection = left_keywords & right_keywords
-            keyword_union = left_keywords | right_keywords
-            keyword_jaccard = len(intersection) / len(keyword_union) if keyword_union else 0.0
-            is_subset = left_keywords.issubset(right_keywords) or right_keywords.issubset(left_keywords)
-            if is_subset or keyword_jaccard >= 0.7:
-                union(left, right)
-                continue
-
         union_size = len(left_item["grams"] | right_item["grams"])
         bigram_similarity = (
             len(left_item["grams"] & right_item["grams"]) / union_size if union_size else 0.0
@@ -370,41 +354,22 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
         root = find(idx)
         grouped.setdefault(root, []).append(item)
 
-    group_summaries: List[Dict[str, object]] = []
+    lines: List[str] = []
+    theme_no = 1
     for group_items in grouped.values():
         group_total = sum(int(entry["count"]) for entry in group_items)
-        sorted_items = sorted(
+        representative = sorted(
+            group_items,
+            key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
+            reverse=True,
+        )[0]
+        lines.append(f"주제{theme_no}. {representative['text']} ({group_total})")
+
+        details = sorted(
             group_items,
             key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
             reverse=True,
         )
-        group_summaries.append(
-            {
-                "total": group_total,
-                "representative": sorted_items[0],
-                "details": sorted_items,
-            }
-        )
-
-    regular_groups = [group for group in group_summaries if int(group["total"]) > 1]
-    other_groups = [group for group in group_summaries if int(group["total"]) == 1]
-
-    regular_groups.sort(
-        key=lambda group: (
-            int(group["total"]),
-            str(cast(Dict[str, object], group["representative"])["text"]),
-        ),
-        reverse=True,
-    )
-
-    lines: List[str] = []
-    theme_no = 1
-    for group in regular_groups:
-        group_total = int(group["total"])
-        representative = cast(Dict[str, object], group["representative"])
-        lines.append(f"주제{theme_no}. {representative['text']} ({group_total})")
-
-        details = cast(List[Dict[str, object]], group["details"])
         for detail in details:
             text = str(detail["text"])
             count = int(detail["count"])
@@ -412,17 +377,6 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
 
         theme_no += 1
 
-    if other_groups:
-        other_details: List[Dict[str, object]] = []
-        for group in other_groups:
-            other_details.extend(cast(List[Dict[str, object]], group["details"]))
-
-        other_details.sort(key=lambda entry: str(entry["text"]))
-        lines.append(f"주제{theme_no}. 기타 ({len(other_details)})")
-        for detail in other_details:
-            lines.append(f"- {detail['text']}")
-
-    lines.append("")
     lines.append(f"필터링 응답 {filtered_count}개")
     return "\n".join(lines)
 
