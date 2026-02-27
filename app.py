@@ -6,25 +6,8 @@ import pandas as pd
 import streamlit as st
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
-from pptx.util import Pt
 
 TEMPLATE_PATH = "template.pptx"
-TABLE_FONT_NAME = "Noto Sans CJK KR DemiLight"
-TABLE_FONT_SIZE_PT = 9
-
-
-def format_chart_data_labels(chart, number_format: str) -> None:
-    for plot in chart.plots:
-        data_labels = plot.data_labels
-        data_labels.number_format = number_format
-        data_labels.number_format_is_linked = False
-
-
-def apply_table_font(cell) -> None:
-    for paragraph in cell.text_frame.paragraphs:
-        for run in paragraph.runs:
-            run.font.name = TABLE_FONT_NAME
-            run.font.size = Pt(TABLE_FONT_SIZE_PT)
 
 
 def identify_question_columns(df: pd.DataFrame, required: int = 10) -> List[str]:
@@ -215,7 +198,6 @@ def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
         ),
     )
     shape.chart.replace_data(chart_data)
-    format_chart_data_labels(shape.chart, "0.0")
 
 
 def update_question_chart(
@@ -234,7 +216,6 @@ def update_question_chart(
         ),
     )
     shape.chart.replace_data(chart_data)
-    format_chart_data_labels(shape.chart, "0%")
 
 
 def update_question_table(
@@ -257,9 +238,7 @@ def update_question_table(
 
     for offset, value in enumerate(rows, start=1):
         if len(table.rows) > offset and len(table.columns) > 1:
-            cell = table.cell(offset, 1)
-            set_text_preserve_style(cell.text_frame, value)
-            apply_table_font(cell)
+            set_text_preserve_style(table.cell(offset, 1).text_frame, value)
 
 
 def populate_ppt(
