@@ -6,8 +6,6 @@ import pandas as pd
 import streamlit as st
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
-from pptx.oxml.ns import qn
-from pptx.util import Pt
 
 TEMPLATE_PATH = "template.pptx"
 
@@ -200,7 +198,6 @@ def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
         ),
     )
     shape.chart.replace_data(chart_data)
-    apply_chart_number_format(shape.chart, "0.0")
 
 
 def update_question_chart(
@@ -219,25 +216,12 @@ def update_question_chart(
         ),
     )
     shape.chart.replace_data(chart_data)
-    apply_chart_number_format(shape.chart, "0%")
-
-
-def apply_chart_number_format(chart, fmt: str) -> None:
-    for series in chart.series:
-        series.has_data_labels = True
-        data_labels = series.data_labels
-        data_labels.show_value = True
-        data_labels.number_format = fmt
-
-    if chart.value_axis is not None:
-        chart.value_axis.tick_labels.number_format = fmt
 
 
 def update_question_table(
     shape, question_idx: int, counts_by_question: Dict[int, Dict[int, int]]
 ) -> None:
     table = shape.table
-    apply_table_font_style(table)
     counts = counts_by_question[question_idx]
     total = sum(counts.values())
 
@@ -255,19 +239,6 @@ def update_question_table(
     for offset, value in enumerate(rows, start=1):
         if len(table.rows) > offset and len(table.columns) > 1:
             set_text_preserve_style(table.cell(offset, 1).text_frame, value)
-
-
-def apply_table_font_style(table) -> None:
-    for row in table.rows:
-        for cell in row.cells:
-            for paragraph in cell.text_frame.paragraphs:
-                if not paragraph.runs:
-                    paragraph.text = paragraph.text or ""
-
-                for run in paragraph.runs:
-                    run.font.name = "Noto Sans CJK KR DemiLight"
-                    run.font.size = Pt(9)
-                    run.font._element.rPr.set(qn("a:ea"), "Noto Sans CJK KR DemiLight")
 
 
 def populate_ppt(
