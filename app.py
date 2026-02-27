@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
+from pptx.util import Pt
 
 TEMPLATE_PATH = "template.pptx"
 
@@ -241,6 +242,32 @@ def update_question_table(
             set_text_preserve_style(table.cell(offset, 1).text_frame, value)
 
 
+def apply_table_font(shape, font_name: str = "Noto Sans CJK KR DemiLight", font_size_pt: int = 9) -> None:
+    if not shape.has_table:
+        return
+
+    for row in shape.table.rows:
+        for cell in row.cells:
+            for paragraph in cell.text_frame.paragraphs:
+                paragraph.font.name = font_name
+                paragraph.font.size = Pt(font_size_pt)
+                for run in paragraph.runs:
+                    run.font.name = font_name
+                    run.font.size = Pt(font_size_pt)
+
+
+def apply_chart_number_format(shape, number_format: str) -> None:
+    if not shape.has_chart:
+        return
+
+    chart = shape.chart
+    for series in chart.series:
+        if not series.has_data_labels:
+            series.has_data_labels = True
+        series.data_labels.number_format = number_format
+        series.data_labels.number_format_is_linked = False
+
+
 def populate_ppt(
     excel_bytes: bytes,
     class_name: str,
@@ -265,12 +292,14 @@ def populate_ppt(
             if shape.has_chart:
                 if name in {"차트 0", "chart 0"}:
                     update_chart_0(shape, placeholders)
+                    apply_chart_number_format(shape, "0.0")
                 else:
                     chart_match = re.match(r"(?:차트|chart)\s*(\d+)$", name)
                     if chart_match:
                         idx = int(chart_match.group(1))
                         if 1 <= idx <= 10:
                             update_question_chart(shape, idx, percentages_by_question)
+                            apply_chart_number_format(shape, "0%")
 
             if shape.has_table:
                 table_match = re.match(r"(?:표|table)\s*(\d+)$", name)
@@ -278,6 +307,7 @@ def populate_ppt(
                     idx = int(table_match.group(1))
                     if 1 <= idx <= 10:
                         update_question_table(shape, idx, counts_by_question)
+                        apply_table_font(shape)
 
     replace_text_placeholders(prs, replacements)
 
