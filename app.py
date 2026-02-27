@@ -128,33 +128,24 @@ def set_text_preserve_style(text_frame, value: str) -> None:
 
 
 def replace_text_placeholders(prs: Presentation, replacements: Dict[str, str]) -> None:
-    def replace_in_paragraph(paragraph) -> None:
-        if not paragraph.runs:
-            return
-
-        full_text = "".join(run.text for run in paragraph.runs)
-        updated = full_text
-        for key, value in replacements.items():
-            updated = updated.replace(key, value)
-
-        if updated == full_text:
-            return
-
-        paragraph.runs[0].text = updated
-        for run in paragraph.runs[1:]:
-            run.text = ""
+    def replace_in_runs(paragraph) -> None:
+        for run in paragraph.runs:
+            updated = run.text
+            for key, value in replacements.items():
+                updated = updated.replace(key, value)
+            run.text = updated
 
     for slide in prs.slides:
         for shape in slide.shapes:
             if hasattr(shape, "text_frame") and shape.text_frame is not None:
                 for paragraph in shape.text_frame.paragraphs:
-                    replace_in_paragraph(paragraph)
+                    replace_in_runs(paragraph)
 
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         for paragraph in cell.text_frame.paragraphs:
-                            replace_in_paragraph(paragraph)
+                            replace_in_runs(paragraph)
 
 
 def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
@@ -195,10 +186,6 @@ def update_chart_0(shape, placeholders: Dict[str, float]) -> None:
         ),
     )
     shape.chart.replace_data(chart_data)
-    plot = shape.chart.plots[0]
-    plot.has_data_labels = True
-    plot.data_labels.number_format = "0.0"
-    plot.data_labels.number_format_is_linked = False
 
 
 def update_question_chart(
@@ -206,22 +193,11 @@ def update_question_chart(
 ) -> None:
     percentages = percentages_by_question[question_idx]
     chart_data = CategoryChartData()
-    chart_data.categories = ["100점", "75점", "50점", "25점"]
+    chart_data.categories = ["1점", "2점", "3점", "4점"]
     chart_data.add_series(
-        "계열",
-        (
-            percentages[4] / 100.0,
-            percentages[3] / 100.0,
-            percentages[2] / 100.0,
-            percentages[1] / 100.0,
-        ),
+        "응답 비율(%)", (percentages[1], percentages[2], percentages[3], percentages[4])
     )
     shape.chart.replace_data(chart_data)
-    plot = shape.chart.plots[0]
-    plot.has_data_labels = True
-    plot.data_labels.show_percentage = True
-    plot.data_labels.number_format = "0%"
-    plot.data_labels.number_format_is_linked = False
 
 
 def update_question_table(
