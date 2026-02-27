@@ -272,7 +272,12 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
     filtered_count = 0
 
     def normalize_for_compare(value: str) -> str:
-        return re.sub(r"\s+", " ", value).strip().lower()
+        lowered = re.sub(r"\s+", " ", value).strip().lower()
+        return re.sub(r"[^0-9a-z가-힣\s]", "", lowered)
+
+    def extract_keywords(value: str) -> set:
+        tokens = re.findall(r"[0-9a-z가-힣]+", value)
+        return {token for token in tokens if len(token) >= 2}
 
     def is_filtered(value: str) -> bool:
         normalized = re.sub(r"\s+", "", value).lower().strip().strip('"\'')
@@ -311,6 +316,7 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             "count": count,
             "norm": normalize_for_compare(text),
             "grams": char_bigrams(text),
+            "keywords": extract_keywords(normalize_for_compare(text)),
         }
         for text, count in deduped_counts.items()
     ]
@@ -337,6 +343,18 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             union(left, right)
             continue
 
+        left_keywords = left_item["keywords"]
+        right_keywords = right_item["keywords"]
+        shared_keywords = left_keywords & right_keywords
+        keyword_union = left_keywords | right_keywords
+        keyword_similarity = len(shared_keywords) / len(keyword_union) if keyword_union else 0.0
+
+        if shared_keywords and (
+            any(len(keyword) >= 3 for keyword in shared_keywords) or keyword_similarity >= 0.5
+        ):
+            union(left, right)
+            continue
+
         union_size = len(left_item["grams"] | right_item["grams"])
         bigram_similarity = (
             len(left_item["grams"] & right_item["grams"]) / union_size if union_size else 0.0
@@ -346,7 +364,9 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             left_item["norm"],
             right_item["norm"],
         ).ratio()
-        if max(bigram_similarity, sequence_similarity) >= 0.55:
+        if max(bigram_similarity, sequence_similarity) >= 0.55 or (
+            shared_keywords and max(bigram_similarity, sequence_similarity) >= 0.45
+        ):
             union(left, right)
 
     grouped: "OrderedDict[int, List[Dict[str, object]]]" = OrderedDict()
@@ -354,7 +374,10 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
         root = find(idx)
         grouped.setdefault(root, []).append(item)
 
-    lines: List[str] = []
+    cluster_summaries = []
+    misc_items: List[Dict[str, object]] = []
+    misc_total = 0
+
     theme_no = 1
     for group_items in grouped.values():
         group_total = sum(int(entry["count"]) for entry in group_items)
@@ -363,20 +386,53 @@ def summarize_qualitative_responses(series: pd.Series) -> str:
             key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
             reverse=True,
         )[0]
-        lines.append(f"주제{theme_no}. {representative['text']} ({group_total})")
-
         details = sorted(
             group_items,
             key=lambda entry: (int(entry["count"]), len(str(entry["text"]))),
             reverse=True,
         )
+
+        if group_total == 1:
+            misc_total += group_total
+            misc_items.extend(details)
+            continue
+
+        cluster_summaries.append(
+            {
+                "representative": representative,
+                "group_total": group_total,
+                "details": details,
+            }
+        )
+
+    cluster_summaries = sorted(
+        cluster_summaries,
+        key=lambda summary: (
+            int(summary["group_total"]),
+            len(str(summary["representative"]["text"])),
+        ),
+        reverse=True,
+    )
+
+    lines: List[str] = []
+    for summary in cluster_summaries:
+        representative = summary["representative"]
+        group_total = int(summary["group_total"])
+        details = summary["details"]
+
+        lines.append(f"주제{theme_no}. {representative['text']} ({group_total})")
         for detail in details:
             text = str(detail["text"])
             count = int(detail["count"])
             lines.append(f"- {text} ({count})" if count > 1 else f"- {text}")
-
         theme_no += 1
 
+    if misc_items:
+        lines.append(f"기타 ({misc_total})")
+        for detail in sorted(misc_items, key=lambda entry: str(entry["text"])):
+            lines.append(f"- {detail['text']}")
+
+    lines.append("")
     lines.append(f"필터링 응답 {filtered_count}개")
     return "\n".join(lines)
 
