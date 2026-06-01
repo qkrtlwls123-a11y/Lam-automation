@@ -546,6 +546,32 @@ def parse_kai_excel(excel_bytes: bytes) -> Tuple[pd.DataFrame, List[int], Option
     return data_df, score_cols, module_col, qualitative_cols[:3]
 
 
+def split_multi_select(text: str) -> List[str]:
+    """Split a (복수 선택 가능) answer into individual selections.
+
+    Commas inside brackets are kept intact so module names with internal commas
+    (예: "기획의 표현 (Writing, Editing 등)") aren't broken apart. Newlines and
+    semicolons are also treated as separators.
+    """
+    parts: List[str] = []
+    buffer: List[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+            buffer.append(ch)
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+            buffer.append(ch)
+        elif depth == 0 and ch in ",;\n":
+            parts.append("".join(buffer).strip())
+            buffer = []
+        else:
+            buffer.append(ch)
+    parts.append("".join(buffer).strip())
+    return [part for part in parts if part]
+
+
 def summarize_module_preferences(series: pd.Series) -> List[Tuple[str, int]]:
     grouped: Dict[str, Dict[str, object]] = {}
 
@@ -553,18 +579,20 @@ def summarize_module_preferences(series: pd.Series) -> List[Tuple[str, int]]:
         if pd.isna(raw):
             continue
 
-        text = re.sub(r"\s+", " ", str(raw)).strip()
-        if not text:
-            continue
+        # 복수응답은 콤마로 구분되므로 개별 모듈로 분리해 각각 1명씩 집계한다.
+        for piece in split_multi_select(str(raw)):
+            text = re.sub(r"\s+", " ", piece).strip()
+            if not text:
+                continue
 
-        key = re.sub(r"[^0-9a-z가-힣]+", "", text.lower())
-        if not key:
-            continue
+            key = re.sub(r"[^0-9a-z가-힣]+", "", text.lower())
+            if not key:
+                continue
 
-        bucket = grouped.setdefault(key, {"count": 0, "labels": {}})
-        bucket["count"] = int(bucket["count"]) + 1
-        labels = bucket["labels"]
-        labels[text] = labels.get(text, 0) + 1
+            bucket = grouped.setdefault(key, {"count": 0, "labels": {}})
+            bucket["count"] = int(bucket["count"]) + 1
+            labels = bucket["labels"]
+            labels[text] = labels.get(text, 0) + 1
 
     summarized: List[Tuple[str, int]] = []
     for bucket in grouped.values():
@@ -595,11 +623,20 @@ def update_kai_module_table(shape, module_rankings: List[Tuple[str, int]]) -> No
     while len(table.rows) < required_rows:
         append_table_row_preserve_style(table, -1)
 
-    for rank, (name, count) in enumerate(module_rankings, start=1):
+    # 동점은 같은 순위로 표기한다 (예: 1, 2, 2, 4위).
+    prev_count: Optional[int] = None
+    prev_rank = 0
+    for position, (name, count) in enumerate(module_rankings, start=1):
+        if count == prev_count:
+            rank = prev_rank
+        else:
+            rank = position
+            prev_rank = rank
+            prev_count = count
         if len(table.columns) > 0:
-            set_text_preserve_style(table.cell(rank, 0).text_frame, f"{rank}위")
+            set_text_preserve_style(table.cell(position, 0).text_frame, f"{rank}위")
         if len(table.columns) > 1:
-            set_text_preserve_style(table.cell(rank, 1).text_frame, f"{name}({count}명)")
+            set_text_preserve_style(table.cell(position, 1).text_frame, f"{name}({count}명)")
 
     for row_idx in range(len(module_rankings) + 1, len(table.rows)):
         if len(table.columns) > 0:
@@ -673,82 +710,228 @@ def format_score_range(scores: List[float]) -> str:
         return f"{rounded[0]:.1f}점"
     return f"{rounded[0]:.1f}~{rounded[-1]:.1f}점"
 
-def build_kai_dynamic_lines(question_avgs: List[float]) -> Tuple[str, str, str]:
-    q1, q2, q3, q4, q5, q6, q7, q8, q9, q10 = question_avgs
+def _has_batchim(word: str) -> bool:
+    """Whether a Korean word ends in a final consonant (받침)."""
+    if not word:
+        return False
+    last = word[-1]
+    if "가" <= last <= "힣":
+        return (ord(last) - 0xAC00) % 28 != 0
+    return False
 
-    high_group = [q1, q4]
-    low_group = [q3, q5]
 
-    high_label = classify_level(sum(high_group) / len(high_group))
-    low_label = classify_level(sum(low_group) / len(low_group), peers=high_group)
+def _join_with_wa(names: List[str]) -> str:
+    """Join Korean labels: 1 → as-is, 2 → 'A와/과 B', 3+ → comma list."""
+    names = [name for name in names if name]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        particle = "과" if _has_batchim(names[0]) else "와"
+        return f"{names[0]}{particle} {names[1]}"
+    return ", ".join(names)
 
-    line2 = (
-        f"전반 만족도와 학습목표 달성도는 {high_label}({format_score_range(high_group)})이었으며, "
-        f"기대 충족도와 현업 적용도는 {low_label}({format_score_range(low_group)}) 나타남."
+
+# 설문 문항 라벨 (5점 척도 10문항: q1~q5 과정, q6~q8 운영, q9~q10 강사)
+COURSE_LABELS = ["전반 만족도", "동료 추천도", "기대 충족도", "학습목표 달성도", "현업 적용도"]
+OPERATION_LABELS = ["운영자 만족도", "시설 만족도", "식사 만족도"]
+INSTRUCTOR_LABELS = ["강의내용 만족도", "강의방식 만족도"]
+
+
+def _describe_score_group(items: List[Tuple[str, float]]) -> str:
+    """Name the highest- and lowest-scoring items in a section, chosen from
+    actual data, with their level and score range."""
+    scored = [(label, float(score)) for label, score in items]
+    rounded = {label: round(score, 1) for label, score in scored}
+    max_r = max(rounded.values())
+    min_r = min(rounded.values())
+
+    if max_r == min_r:
+        level = classify_level(sum(score for _, score in scored) / len(scored))
+        labels = [label for label, _ in scored]
+        return f"{_join_with_wa(labels)}가 모두 {level}({format_score_range([s for _, s in scored])})으로 고르게 나타남."
+
+    high = [label for label, _ in scored if rounded[label] == max_r]
+    low = [label for label, _ in scored if rounded[label] == min_r]
+    high_scores = [score for label, score in scored if rounded[label] == max_r]
+    low_scores = [score for label, score in scored if rounded[label] == min_r]
+    high_level = classify_level(max(high_scores))
+
+    return (
+        f"{_join_with_wa(high)}는 {high_level}({format_score_range(high_scores)})이었으며, "
+        f"{_join_with_wa(low)}는 상대적으로 낮은 수준({format_score_range(low_scores)})으로 나타남."
     )
 
-    op_pair = [q6, q7]
-    op_pair_label = classify_level(sum(op_pair) / len(op_pair))
-    meal_label = classify_level(q8, peers=[q6, q7])
-    line5 = (
-        f"운영자 만족도({q6:.1f}점) 및 시설 만족도({q7:.1f}점)는 {op_pair_label}이며, "
-        f"식사 만족도({q8:.1f}점)는 {meal_label}로 확인됨."
-    )
 
-    instructor_scores = [q9, q10]
-    instructor_label = classify_level(sum(instructor_scores) / len(instructor_scores), peers=question_avgs)
-    line7 = (
+def build_kai_textbox4_paragraphs(
+    question_avgs: List[float], module_rankings: List[Tuple[str, int]]
+) -> List[str]:
+    """Build all 7 paragraphs of slide 7 'TextBox 4' (시사점) from actual data:
+    a headline + a data sentence for each of 과정/운영/강사, plus a module line."""
+    scores = [float(value) for value in question_avgs]
+    course = list(zip(COURSE_LABELS, scores[0:5]))
+    operation = list(zip(OPERATION_LABELS, scores[5:8]))
+    instructor = list(zip(INSTRUCTOR_LABELS, scores[8:10]))
+
+    def avg(pairs: List[Tuple[str, float]]) -> float:
+        return sum(score for _, score in pairs) / len(pairs) if pairs else 0.0
+
+    def lowest_label(pairs: List[Tuple[str, float]]) -> str:
+        return min(pairs, key=lambda item: item[1])[0]
+
+    # 과정 만족도
+    course_level = classify_level(avg(course))
+    p0 = (
+        f"과정 만족도 : 전반적인 과정 만족도가 {course_level}으로 나타났으며, "
+        f"{lowest_label(course)}에서 소폭 개선 여지가 확인됨."
+    )
+    p1 = _describe_score_group(course)
+
+    # 모듈 선호 (복수 선택 가능)
+    if module_rankings:
+        top_name, top_count = module_rankings[0]
+        p2 = (
+            f"'{top_name}' 모듈이 {top_count}명의 선택으로 선호도 1위를 기록했으며, "
+            f"복수 선택 응답 기준 학습 활용도가 높은 것으로 확인됨."
+        )
+    else:
+        p2 = "모듈별 선호 응답이 충분하지 않아 별도 분석은 생략함."
+
+    # 운영 만족도
+    operation_level = classify_level(avg(operation))
+    p3 = (
+        f"운영 만족도 : 운영 전반은 {operation_level}으로 평가되었으며, "
+        f"{lowest_label(operation)} 등에서 개선 여지가 확인됨."
+    )
+    p4 = _describe_score_group(operation)
+
+    # 강사 만족도
+    instructor_level = classify_level(avg(instructor))
+    p5 = f"강사 만족도 : 강사의 전문성과 강의 방식에 대한 학습자 수용성이 {instructor_level}으로 나타남."
+    q9, q10 = scores[8], scores[9]
+    p6 = (
         f"강의 내용({q9:.1f}점)과 강의방식({q10:.1f}점)의 만족도를 검토할 때 "
-        f"교육 구성과 진행 방식에 대한 학습자들의 수용성이 {instructor_label}임을 확인할 수 있음."
+        f"교육 구성과 진행 방식에 대한 학습자들의 수용성이 {instructor_level}임을 확인할 수 있음."
     )
 
-    return line2, line5, line7
+    return [p0, p1, p2, p3, p4, p5, p6]
 
 
-def update_kai_slide7_textbox4(prs: Presentation, line2: str, line5: str, line7: str) -> None:
-    fallback_shape = None
+def _set_paragraph_text(paragraph, value: str) -> None:
+    """Replace a paragraph's text while keeping its first run's formatting."""
+    if paragraph.runs:
+        paragraph.runs[0].text = value
+        for run in paragraph.runs[1:]:
+            run.text = ""
+    else:
+        paragraph.text = value
 
+
+def _find_slide7_textbox4(prs: Presentation):
     for slide_idx, slide in enumerate(prs.slides, start=1):
         if slide_idx != 7:
             continue
-
+        fallback = None
         for shape in slide.shapes:
             if not hasattr(shape, "text_frame") or shape.text_frame is None:
                 continue
-
             shape_name = (shape.name or "").strip().lower()
-            current_text = "\n".join(paragraph.text for paragraph in shape.text_frame.paragraphs)
-
-            if fallback_shape is None and (
+            current_text = "\n".join(p.text for p in shape.text_frame.paragraphs)
+            if fallback is None and (
                 "과정 만족도" in current_text and "운영 만족도" in current_text and "강사 만족도" in current_text
             ):
-                fallback_shape = shape
-
+                fallback = shape
             if shape_name in {"textbox 4", "text box 4"}:
-                target = shape
-                break
-        else:
-            target = None
+                return shape
+        return fallback
+    return None
 
-        if target is None:
-            target = fallback_shape
 
-        if target is None:
-            return
-
-        lines = [paragraph.text for paragraph in target.text_frame.paragraphs]
-        while len(lines) < 7:
-            lines.append("")
-
-        lines[1] = line2
-        lines[4] = line5
-        lines[6] = line7
-
-        set_text_preserve_style(target.text_frame, "\n".join(lines))
+def update_kai_slide7_textbox4(prs: Presentation, paragraphs: List[str]) -> None:
+    target = _find_slide7_textbox4(prs)
+    if target is None:
         return
 
+    text_frame = target.text_frame
+    while len(text_frame.paragraphs) < len(paragraphs):
+        text_frame.add_paragraph()
 
-def populate_ppt_lam(excel_bytes: bytes, class_name: str, template_path: Path) -> bytes:
+    for idx, paragraph in enumerate(text_frame.paragraphs):
+        value = paragraphs[idx] if idx < len(paragraphs) else ""
+        _set_paragraph_text(paragraph, value)
+
+
+def update_kai_summary_average(prs: Presentation, overall_avg: float) -> None:
+    """Fill slide 3 '평균 : NN' textbox with the overall satisfaction average."""
+    pattern = re.compile(r"(평균\s*[:：]\s*)\d+(?:\.\d+)?")
+    replacement = f"평균 : {overall_avg:.2f}"
+    for slide_idx, slide in enumerate(prs.slides, start=1):
+        if slide_idx != 3:
+            continue
+        for shape in slide.shapes:
+            if not hasattr(shape, "text_frame") or shape.text_frame is None:
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                if pattern.search(paragraph.text):
+                    _set_paragraph_text(paragraph, pattern.sub(replacement, paragraph.text))
+
+
+def _fill_attendance_text(text: str, total: int, attended: int, rate: int) -> str:
+    """Fill the '... 00명 中 ... 00명 참석 ... 00%' placeholders in one text block.
+
+    Handles the wording variants used across slides (총 인원 / 전체 대상, 참석률 : / no
+    label). Replaces the attended count first (the '00명' right before '참석'), then
+    the remaining total '00명', then the rate '00%'. Each placeholder is two-or-more
+    zeros, so real numbers are never touched.
+    """
+    if "참석" not in text or "%" not in text or "명" not in text:
+        return text
+    filled = re.sub(r"0{2,}(\s*)명(?=\s*참석)", rf"{attended}\1명", text, count=1)
+    filled = re.sub(r"0{2,}(\s*)명", rf"{total}\1명", filled, count=1)
+    filled = re.sub(r"0{2,}(\s*)%", rf"{rate}\1%", filled, count=1)
+    return filled
+
+
+def fill_attendance(prs: Presentation, total_count: Optional[int], attended_count: Optional[int]) -> None:
+    """Auto-fill the repeated '총 인원 00명 中 00명 참석 (참석률 00%)' phrase.
+
+    When 참석 인원 is left blank, full attendance (100%) is assumed.
+    """
+    try:
+        total = int(total_count) if total_count else 0
+    except (TypeError, ValueError):
+        total = 0
+    if total <= 0:
+        return
+
+    try:
+        attended = int(attended_count) if attended_count else 0
+    except (TypeError, ValueError):
+        attended = 0
+    if attended <= 0:
+        attended = total
+    attended = min(attended, total)
+    rate = int(round((attended / total) * 100))
+
+    def process(text_frame) -> None:
+        for paragraph in text_frame.paragraphs:
+            new_text = _fill_attendance_text(paragraph.text, total, attended, rate)
+            if new_text != paragraph.text:
+                _set_paragraph_text(paragraph, new_text)
+
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if hasattr(shape, "text_frame") and shape.text_frame is not None:
+                process(shape.text_frame)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        process(cell.text_frame)
+
+
+def populate_ppt_lam(excel_bytes: bytes, class_name: str, template_path: Path,
+                     total_count: Optional[int] = None, attended_count: Optional[int] = None) -> bytes:
     df = pd.read_excel(io.BytesIO(excel_bytes))
     question_cols = identify_question_columns(df)
 
@@ -783,6 +966,7 @@ def populate_ppt_lam(excel_bytes: bytes, class_name: str, template_path: Path) -
                     format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
 
     replace_text_placeholders(prs, replacements)
+    fill_attendance(prs, total_count, attended_count)
 
     output = io.BytesIO()
     prs.save(output)
@@ -790,7 +974,8 @@ def populate_ppt_lam(excel_bytes: bytes, class_name: str, template_path: Path) -
     return output.getvalue()
 
 
-def populate_ppt_kai(excel_bytes: bytes, class_name: str, template_path: Path) -> bytes:
+def populate_ppt_kai(excel_bytes: bytes, class_name: str, template_path: Path,
+                     total_count: Optional[int] = None, attended_count: Optional[int] = None) -> bytes:
     df, score_cols, module_col, qualitative_cols = parse_kai_excel(excel_bytes)
 
     numeric = df[score_cols].apply(pd.to_numeric, errors="coerce")
@@ -807,15 +992,13 @@ def populate_ppt_kai(excel_bytes: bytes, class_name: str, template_path: Path) -
     if module_col is not None:
         module_rankings = summarize_module_preferences(df[module_col])
 
-    line2, line5, line7 = build_kai_dynamic_lines(question_avgs)
+    textbox4_paragraphs = build_kai_textbox4_paragraphs(question_avgs, module_rankings)
+    overall_avg = sum(question_avgs) / len(question_avgs) if question_avgs else 0.0
 
     replacements = {
         "class_name": class_name.strip() if class_name.strip() else "과정명 미입력",
         "n_number": str(respondent_count),
         "respondent_count": str(respondent_count),
-        "text_01": line2,
-        "text_02": line5,
-        "text_03": line7,
     }
     prs = Presentation(str(template_path))
 
@@ -835,7 +1018,11 @@ def populate_ppt_kai(excel_bytes: bytes, class_name: str, template_path: Path) -
                 elif slide_idx == 8 and table_idx == 6 and len(shape.table.columns) >= 3:
                     update_kai_qualitative_table(shape, df, qualitative_cols)
                     format_table_font(shape.table, "Noto Sans CJK KR DemiLight", 9)
+
+    update_kai_slide7_textbox4(prs, textbox4_paragraphs)
+    update_kai_summary_average(prs, overall_avg)
     replace_text_placeholders(prs, replacements)
+    fill_attendance(prs, total_count, attended_count)
 
     output = io.BytesIO()
     prs.save(output)
@@ -843,11 +1030,12 @@ def populate_ppt_kai(excel_bytes: bytes, class_name: str, template_path: Path) -
     return output.getvalue()
 
 
-def populate_ppt(excel_bytes: bytes, class_name: str, report_type: str, template_path: Path) -> bytes:
+def populate_ppt(excel_bytes: bytes, class_name: str, report_type: str, template_path: Path,
+                 total_count: Optional[int] = None, attended_count: Optional[int] = None) -> bytes:
     if report_type == "lam":
-        return populate_ppt_lam(excel_bytes, class_name, template_path)
+        return populate_ppt_lam(excel_bytes, class_name, template_path, total_count, attended_count)
     if report_type == "kai":
-        return populate_ppt_kai(excel_bytes, class_name, template_path)
+        return populate_ppt_kai(excel_bytes, class_name, template_path, total_count, attended_count)
     raise ValueError(f"지원하지 않는 보고서 유형입니다: {report_type}")
 
 
@@ -867,6 +1055,15 @@ def main() -> None:
         st.error(str(exc))
 
     class_name = st.text_input("과정명", placeholder="예: 2026년 신입사원 교육")
+
+    attendance_col1, attendance_col2 = st.columns(2)
+    with attendance_col1:
+        total_count = st.number_input("총 인원", min_value=0, value=0, step=1,
+                                      help="참석자 명단·참석 현황 문구에 자동으로 채워집니다. (0이면 미입력)")
+    with attendance_col2:
+        attended_count = st.number_input("참석 인원", min_value=0, value=0, step=1,
+                                         help="비워두면 총 인원과 동일(참석률 100%)로 계산됩니다.")
+
     uploaded_excel = st.file_uploader("원본(raw data) 파일 업로드 (.xlsx)", type=["xlsx"])
 
     if st.button("PPT 생성", type="primary"):
@@ -878,7 +1075,14 @@ def main() -> None:
             return
 
         try:
-            ppt_bytes = populate_ppt(uploaded_excel.read(), class_name, report_type, template_path)
+            ppt_bytes = populate_ppt(
+                uploaded_excel.read(),
+                class_name,
+                report_type,
+                template_path,
+                total_count=int(total_count) or None,
+                attended_count=int(attended_count) or None,
+            )
         except Exception as exc:  # noqa: BLE001
             st.exception(exc)
             return
