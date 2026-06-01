@@ -152,27 +152,52 @@ def set_text_preserve_style(text_frame, value: str) -> None:
 
 
 def replace_text_placeholders(prs: Presentation, replacements: Dict[str, str]) -> None:
-    def replace_in_runs(paragraph) -> None:
-        if not paragraph.runs:
-            return
+    """Replace placeholder tokens with their values, even when PowerPoint has
+    split a single placeholder across multiple runs.
+
+    python-pptx exposes text as paragraphs of independent runs, and a single
+    word like ``sub_avg_03`` can be stored as ``['sub_avg', '_03']`` after a PPT
+    edit. A naive ``run.text.replace`` then never sees the full token. We do two
+    passes: (1) run-level replacement which preserves intra-run formatting, then
+    (2) when the token still survives in the joined paragraph text, rewrite the
+    paragraph keeping the first run's formatting.
+    """
+    # Apply longer keys first so a shorter key never partially consumes a longer
+    # one (defensive against future overlapping placeholders).
+    items = sorted(replacements.items(), key=lambda kv: len(kv[0]), reverse=True)
+
+    def replace_in_paragraph(paragraph) -> None:
+        # 1차: run 단위 치환. placeholder가 한 run 안에 온전히 있을 때 서식 보존.
         for run in paragraph.runs:
             updated = run.text
-            for key, value in replacements.items():
-                updated = updated.replace(key, value)
+            for key, value in items:
+                if key and key in updated:
+                    updated = updated.replace(key, value)
             if updated != run.text:
                 run.text = updated
 
-    for slide_idx, slide in enumerate(prs.slides, start=1):
+        # 2차: 여전히 paragraph 텍스트에 남아 있는 placeholder는 run 사이에 끊긴
+        # 것이다. 문단 단위로 한 번에 치환하고 첫 run의 서식으로 모은다.
+        full_text = paragraph.text
+        if not any(key and key in full_text for key, _ in items):
+            return
+        new_text = full_text
+        for key, value in items:
+            if key:
+                new_text = new_text.replace(key, value)
+        if new_text != full_text:
+            _set_paragraph_text(paragraph, new_text)
+
+    for slide in prs.slides:
         for shape in slide.shapes:
             if hasattr(shape, "text_frame") and shape.text_frame is not None:
                 for paragraph in shape.text_frame.paragraphs:
-                    replace_in_runs(paragraph)
-
+                    replace_in_paragraph(paragraph)
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         for paragraph in cell.text_frame.paragraphs:
-                            replace_in_runs(paragraph)
+                            replace_in_paragraph(paragraph)
 
 
 def set_chart_number_format(chart, number_format: str) -> None:
